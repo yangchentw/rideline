@@ -1,0 +1,67 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {DatabaseSync} from 'node:sqlite';import {readFileSync} from 'node:fs';import worker from '../server/worker.js';
+const sqlite=new DatabaseSync(':memory:');sqlite.exec(readFileSync(new URL('../server/schema.sql',import.meta.url),'utf8'));
+const DB={prepare(sql){return{bind(...args){return{async run(){return sqlite.prepare(sql).run(...args)},async first(){return sqlite.prepare(sql).get(...args)||null},async all(){return {results:sqlite.prepare(sql).all(...args)}}}},async all(){return{results:sqlite.prepare(sql).all()}}}}};
+const env={DB,ADMIN_KEY:'test-only-organizer',ASSETS:{fetch:()=>new Response('asset')}};
+async function request(path,body,admin=false,method='POST'){const response=await worker.fetch(new Request('http://test/api'+path,{method:body?method:'GET',headers:{'Content-Type':'application/json',...(admin?{Authorization:'Bearer test-only-organizer'}:{})},...(body?{body:JSON.stringify(body)}:{})}),env);return{status:response.status,body:await response.json()};}
+test('shared attendance: authorization, uniqueness, token identity, idempotency, and event isolation',async()=>{const payload={name:'測試騎行',startsAt:'2026-10-10T06:00:00+08:00',route:[[24,120],[23,120]],distance:111,checkpoints:[{name:'起點',lat:24,lng:120,km:0},{name:'終點',lat:23,lng:120,km:111}]};assert.equal((await request('/events',payload)).status,401);assert.equal((await request('/events',{...payload,route:[[999,120],[23,120]]},true)).status,400);const event=(await request('/events',payload,true)).body;const second=(await request('/events',payload,true)).body;const publicList=(await request('/events')).body;assert.equal(publicList[0].checkpoints[0].secret,undefined);const all=(await request('/events',null,true)).body;const cp=all.find(e=>e.id===event.id).checkpoints[0];const p=(await request(`/events/${event.id}/join`,{name:'小安'})).body;assert.ok(p.token);assert.equal((await request(`/events/${event.id}/join`,{name:'小安'})).status,409);assert.equal((await request(`/events/${second.id}/join`,{name:'小安'})).status,201);const check={checkpointId:cp.id,secret:cp.secret,token:p.token};assert.equal((await request(`/events/${event.id}/checkins`,{...check,secret:'invalid'})).status,400);assert.equal((await request(`/events/${event.id}/checkins`,{...check,token:'invalid'})).status,401);const first=await request(`/events/${event.id}/checkins`,check);assert.equal(first.status,200);const repeat=await request(`/events/${event.id}/checkins`,check);assert.equal(first.body.arrivedAt,repeat.body.arrivedAt);assert.equal((await request(`/events/${second.id}/checkins`,check)).status,400);const list=(await request('/events')).body;assert.equal(list.find(e=>e.id===event.id).participants[0].checkins[cp.id],first.body.arrivedAt);assert.equal(list.find(e=>e.id===second.id).participants[0].checkins[cp.id],undefined);});
+test('add/remove checkpoints preserves checkins, QR identities, and guards stale updates',async()=>{const initial=(await request('/events',null,true)).body[0];const original=initial.checkpoints[0];const person=(await request(`/events/${initial.id}/join`,{name:'刪除保留測試'})).body;await request(`/events/${initial.id}/checkins`,{checkpointId:original.id,secret:original.secret,token:person.token});const added={id:'client-new',name:'新增補給站',lat:23.5,lng:120,km:55};const change={checkpoints:[...initial.checkpoints,added],expectedIds:initial.checkpoints.map(c=>c.id)};assert.equal((await request(`/events/${initial.id}/checkpoints`,change,false,'PUT')).status,401);assert.equal((await request(`/events/${initial.id}/checkpoints`,change,true,'PUT')).status,200);assert.equal((await request(`/events/${initial.id}/checkpoints`,change,true,'PUT')).status,409);const next=(await request('/events',null,true)).body.find(e=>e.id===initial.id);assert.equal(next.checkpoints.length,3);assert.equal(next.checkpoints[0].secret,original.secret);assert.ok(next.checkpoints[2].secret);assert.notEqual(next.checkpoints[2].id,'client-new');assert.equal((await request(`/events/${initial.id}/checkpoints`,{checkpoints:next.checkpoints.slice(1),expectedIds:next.checkpoints.map(c=>c.id)},true,'PUT')).status,200);const removed=(await request('/events',null,true)).body.find(e=>e.id===initial.id);assert.equal(removed.checkpoints.length,2);assert.ok(removed.participants.find(p=>p.id===person.id).checkins[original.id]);assert.equal((await request(`/events/${initial.id}/checkins`,{checkpointId:original.id,secret:original.secret,token:person.token})).status,400);const archived=JSON.parse(sqlite.prepare('SELECT checkpoints FROM events WHERE id=?').get(initial.id).checkpoints).find(c=>c.id===original.id);assert.ok(archived.deletedAt);assert.equal((await request(`/events/${initial.id}/checkpoints`,{checkpoints:[],expectedIds:removed.checkpoints.map(c=>c.id)},true,'PUT')).status,400);});
+
+test('camera check-in requires QR credentials and the old direct endpoint is disabled',async()=>{
+  const payload={name:'相機打卡測試',startsAt:'2026-10-10T06:00:00+08:00',route:[[24,120],[23,120]],distance:111,checkpoints:[{name:'起點',lat:24,lng:120,km:0}]};
+  const event=(await request('/events',payload,true)).body;
+  const cp=(await request('/events',null,true)).body.find(e=>e.id===event.id).checkpoints[0];
+  const person=(await request(`/events/${event.id}/join`,{name:'掃碼騎士'})).body;
+  const data={checkpointId:cp.id,token:person.token};
+  assert.equal((await request(`/events/${event.id}/quick-checkins`,data)).status,404);
+  assert.equal((await request(`/events/${event.id}/checkins`,data)).status,400);
+  assert.equal((await request(`/events/${event.id}/checkins`,{...data,secret:'invalid'})).status,400);
+  const first=await request(`/events/${event.id}/checkins`,{...data,secret:cp.secret});
+  assert.equal(first.status,200);
+  assert.equal((await request(`/events/${event.id}/checkins`,{...data,secret:cp.secret})).body.arrivedAt,first.body.arrivedAt);
+});
+
+test('activity keys grant only event QR access, stay private, and can be rotated by organizers',async()=>{
+  const payload={name:'活動金鑰測試',startsAt:'2026-10-10T06:00:00+08:00',route:[[24,120],[23,120]],distance:111,activityKey:'event-only-pass',checkpoints:[{name:'起點',lat:24,lng:120,km:0},{name:'終點',lat:23,lng:120,km:111}]};
+  assert.equal((await request('/events',{...payload,activityKey:'short'},true)).status,400);
+  const event=(await request('/events',payload,true)).body;
+  const other=(await request('/events',{...payload,activityKey:'other-event-pass'},true)).body;
+  const legacy=(await request('/events',{...payload,activityKey:''},true)).body;
+  const path=`/events/${event.id}/qr-access`;
+  const publicEvent=(await request('/events')).body.find(e=>e.id===event.id);
+  assert.equal(publicEvent.hasActivityKey,true);
+  assert.equal(publicEvent.checkpoints[0].secret,undefined);
+  const serialized=JSON.stringify(publicEvent);
+  assert.ok(!serialized.includes(payload.activityKey));
+  assert.ok(!serialized.includes('"hash"'));
+  assert.ok(!serialized.includes('"salt"'));
+  const stored=sqlite.prepare('SELECT salt,hash FROM event_keys WHERE event_id=?').get(event.id);
+  assert.equal(stored.hash.length,64);
+  assert.notEqual(stored.hash,payload.activityKey);
+  assert.equal((await request(path,{})).status,401);
+  assert.equal((await request(path,{key:'wrong-key'})).status,401);
+  assert.equal((await request(path,{key:'other-event-pass'})).status,401);
+  assert.equal((await request(`/events/${other.id}/qr-access`,{key:payload.activityKey})).status,401);
+  const granted=await request(path,{key:payload.activityKey});
+  assert.equal(granted.status,200);
+  assert.equal(granted.body.checkpoints.length,2);
+  const cp=granted.body.checkpoints[0];
+  assert.ok(cp.secret);
+  assert.equal((await request('/events',payload,false)).status,401);
+  assert.equal((await request(`/events/${event.id}/activity-key`,{key:'new-event-pass'},false,'PUT')).status,401);
+  assert.equal((await request(`/events/${event.id}/checkpoints`,{checkpoints:[],key:payload.activityKey},false,'PUT')).status,401);
+  assert.equal((await request(`/events/${legacy.id}/qr-access`,{key:payload.activityKey})).status,403);
+  assert.equal((await request(`/events/${legacy.id}/qr-access`,{},true)).status,200);
+  assert.equal((await request(`/events/${legacy.id}/activity-key`,{key:'legacy-event-pass'},true,'PUT')).status,200);
+  assert.equal((await request(`/events/${legacy.id}/qr-access`,{key:'legacy-event-pass'})).status,200);
+  assert.equal((await request(`/events/${event.id}/activity-key`,{key:'short'},true,'PUT')).status,400);
+  assert.equal((await request(`/events/${event.id}/activity-key`,{key:'new-event-pass'},true,'PUT')).status,200);
+  assert.equal((await request(path,{key:payload.activityKey})).status,401);
+  const rotated=await request(path,{key:'new-event-pass'});
+  assert.equal(rotated.status,200);
+  assert.equal(rotated.body.checkpoints[0].secret,cp.secret);
+  const rider=(await request(`/events/${event.id}/join`,{name:'活動金鑰騎士'})).body;
+  assert.equal((await request(`/events/${event.id}/checkins`,{checkpointId:cp.id,secret:cp.secret,token:rider.token})).status,200);
+  const adminEvent=(await request('/events',null,true)).body.find(e=>e.id===event.id);
+  await request(`/events/${event.id}/checkpoints`,{checkpoints:adminEvent.checkpoints.slice(1),expectedIds:adminEvent.checkpoints.map(c=>c.id)},true,'PUT');
+  assert.equal((await request(path,{key:'new-event-pass'})).body.checkpoints.some(c=>c.id===cp.id),false);
+});

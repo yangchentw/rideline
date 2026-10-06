@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {distanceOf,csvFor} from '../src/domain.js';
+test('route distance uses geographic coordinates in km',()=>{assert.equal(distanceOf([[24,120],[24,120]]),0);assert.ok(Math.abs(distanceOf([[0,0],[0,1]])-111.195)<.01);});
+test('CSV quotes names, protects spreadsheet formulas, and exports missing arrivals',()=>{const csv=csvFor({checkpoints:[{id:'a',name:'起點'}],participants:[{name:'=SUM(1,2)',checkins:{}},{name:'阿"哲',checkins:{a:'2026-10-10T00:00:00Z'}}]});assert.ok(csv.startsWith('\uFEFF'));assert.ok(csv.includes('"\'=SUM(1,2)"'));assert.ok(csv.includes('"阿""哲"'));assert.ok(csv.includes('尚未打卡'));assert.ok(csv.includes('08:00'));});
