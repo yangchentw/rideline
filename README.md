@@ -2,10 +2,6 @@
 
 以手機操作為主的單車騎行路線與點名系統。主辦者建立活動、上傳 GPX 路線並設定打卡點；參加者用自選名稱加入，抵達時掃描 QR Code，留下各站的打卡時間。
 
-**網站作者：YangChen**
-
-**正式網站：[rideline.yangchentw.workers.dev](https://rideline.yangchentw.workers.dev/)**
-
 ## 主要功能
 
 - **活動金鑰**：每個活動可設定獨立金鑰，提供現場人員顯示、下載與列印 QR Code，不能管理活動或打卡點。
