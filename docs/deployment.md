@@ -62,3 +62,7 @@ npx wrangler d1 export rideline-db --remote --output .wrangler/rideline-backup.s
 ```
 
 備份放在已忽略的 `.wrangler` 目錄，另行保管。Worker 版本回退不會回退 D1 資料。
+
+## 1.1 升級
+
+推送 1.1 觸發自動部署前，先執行 `npm run db:remote`，建立 `event_endings` 表。此表獨立記錄活動結束時間，保留原活動、參加者與打卡資料；舊版本部署可忽略此表。新版結束活動需要重新輸入 `ADMIN_KEY`，並於後端阻擋已結束活動的加入及打卡。

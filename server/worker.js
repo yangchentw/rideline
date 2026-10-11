@@ -14,9 +14,10 @@ export default {
         const { results: events } = await env.DB.prepare('SELECT * FROM events ORDER BY starts_at DESC').all();
         const { results: people } = await env.DB.prepare('SELECT id,event_id,name,joined_at FROM participants').all();
         const { results: checks } = await env.DB.prepare('SELECT * FROM checkins').all();
+        const { results: endings } = await env.DB.prepare('SELECT * FROM event_endings').all();
         const { results: keys } = await env.DB.prepare('SELECT event_id FROM event_keys').all();
         return json(events.map(e => ({ id:e.id, name:e.name, startsAt:e.starts_at, description:e.description, route:JSON.parse(e.route), distance:e.distance,
-          hasActivityKey:keys.some(k=>k.event_id===e.id),checkpoints:JSON.parse(e.checkpoints).filter(c=>!c.deletedAt).map(c => admin ? c : ({ ...c, secret:undefined })),
+          archivedCheckpoints:JSON.parse(e.checkpoints).filter(c=>c.deletedAt).map(c=>({...c,secret:undefined})),endedAt:endings.find(x=>x.event_id===e.id)?.ended_at||null,hasActivityKey:keys.some(k=>k.event_id===e.id),checkpoints:JSON.parse(e.checkpoints).filter(c=>!c.deletedAt).map(c => admin ? c : ({ ...c, secret:undefined })),
           participants:people.filter(p=>p.event_id===e.id).map(p=>({id:p.id,name:p.name,joinedAt:p.joined_at,checkins:Object.fromEntries(checks.filter(c=>c.participant_id===p.id).map(c=>[c.checkpoint_id,c.arrived_at]))})) })));
       }
       if(url.pathname==='/api/maps/resolve' && request.method==='POST'){if(!admin)return json({error:'請先登入主辦者'},401);try{const {url:link}=await request.json();return json(await resolveMapsLink(link));}catch(e){return json({error:e.message},400);}}
@@ -31,11 +32,19 @@ export default {
         if(activityKey)await env.DB.prepare('INSERT INTO event_keys VALUES (?,?,?)').bind(id,activityKey.salt,activityKey.hash).run();
         return json({id},201);
       }
-      const match = url.pathname.match(/^\/api\/events\/([^/]+)\/(join|checkins|checkpoints|qr-access|activity-key)$/);
+      const match = url.pathname.match(/^\/api\/events\/([^/]+)\/(join|checkins|checkpoints|qr-access|activity-key|end)$/);
       if (!match) return json({error:'找不到此功能'},404);
       const [, eventId, action]=match;
       const event=await env.DB.prepare('SELECT * FROM events WHERE id=?').bind(eventId).first();
       if (!event) return json({error:'找不到此活動'},404);
+      if(action==='end' && request.method==='POST') {
+        if(!env.ADMIN_KEY || body.password!==env.ADMIN_KEY)return json({error:'主辦者密碼不正確'},401);
+        await env.DB.prepare('INSERT INTO event_endings VALUES (?,?) ON CONFLICT(event_id) DO NOTHING').bind(eventId,new Date().toISOString()).run();
+        const ended=await env.DB.prepare('SELECT ended_at FROM event_endings WHERE event_id=?').bind(eventId).first();
+        return json({endedAt:ended.ended_at});
+      }
+      const ended=await env.DB.prepare('SELECT ended_at FROM event_endings WHERE event_id=?').bind(eventId).first();
+      if(ended && ['join','checkins','checkpoints'].includes(action))return json({error:'活動已結束，無法參加、打卡或修改打卡點'},409);
       if(action==='activity-key'&&request.method==='PUT'){
         if(!admin)return json({error:'請先登入主辦者'},401);
         if(!validActivityKey(body.key))return json({error:'活動金鑰請設定為 6–64 字'},400);
@@ -57,7 +66,7 @@ export default {
         const existing=await env.DB.prepare('SELECT id FROM participants WHERE event_id=? AND name=?').bind(eventId,name).first();
         if(existing) return json({error:'這個名稱已被使用，請換一個名稱'},409);
         const id=uuid(),token=uuid();
-        try { await env.DB.prepare('INSERT INTO participants VALUES (?,?,?,?,?)').bind(id,eventId,name,token,new Date().toISOString()).run(); }
+        try { const result=await env.DB.prepare('INSERT INTO participants SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM event_endings WHERE event_id=?)').bind(id,eventId,name,token,new Date().toISOString(),eventId).run(); if((result.meta?.changes??result.changes)===0)return json({error:'活動已結束，無法參加'},409); }
         catch(e) { if(String(e).includes('UNIQUE')) return json({error:'這個名稱已被使用，請換一個名稱'},409); throw e; }
         return json({id,name,token},201);
       }
@@ -66,8 +75,9 @@ export default {
         if(!cp) return json({error:'打卡 QR Code 無效'},400);
         const p=await env.DB.prepare('SELECT id,name FROM participants WHERE event_id=? AND token=?').bind(eventId,String(body.token||'')).first();
         if(!p) return json({error:'請先加入活動'},401);
-        await env.DB.prepare('INSERT INTO checkins VALUES (?,?,?,?) ON CONFLICT DO NOTHING').bind(eventId,p.id,cp.id,new Date().toISOString()).run();
+        await env.DB.prepare('INSERT INTO checkins SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM event_endings WHERE event_id=?) ON CONFLICT DO NOTHING').bind(eventId,p.id,cp.id,new Date().toISOString(),eventId).run();
         const saved=await env.DB.prepare('SELECT arrived_at FROM checkins WHERE event_id=? AND participant_id=? AND checkpoint_id=?').bind(eventId,p.id,cp.id).first();
+        if(!saved)return json({error:'活動已結束，無法打卡'},409);
         return json({arrivedAt:saved.arrived_at,name:p.name});
       }
       if(action==='checkpoints' && request.method==='PUT') {
@@ -77,7 +87,7 @@ export default {
         if(JSON.stringify(body.expectedIds)!==JSON.stringify(active.map(c=>c.id)))return json({error:'打卡點已被更新，請重新整理後再試'},409);
         const next=body.checkpoints.map(c=>{const existing=active.find(o=>o.id===c.id);return {id:existing?.id||uuid(),secret:existing?.secret||uuid(),name:c.name.trim(),lat:c.lat,lng:c.lng,km:Number.isFinite(c.km)?c.km:existing?.km||0,mapsUrl:typeof c.mapsUrl==='string'?c.mapsUrl.slice(0,4096):''};});
         const removed=old.filter(o=>!body.checkpoints.some(c=>c.id===o.id)).map(o=>({...o,deletedAt:o.deletedAt||new Date().toISOString()}));
-        const result=await env.DB.prepare('UPDATE events SET checkpoints=? WHERE id=? AND checkpoints=?').bind(JSON.stringify([...next,...removed]),eventId,event.checkpoints).run();
+        const result=await env.DB.prepare('UPDATE events SET checkpoints=? WHERE id=? AND checkpoints=? AND NOT EXISTS (SELECT 1 FROM event_endings WHERE event_id=?)').bind(JSON.stringify([...next,...removed]),eventId,event.checkpoints,eventId).run();
         if((result.meta?.changes??result.changes)===0)return json({error:'打卡點已被更新，請重新整理後再試'},409);
         return json({ok:true});
       }

@@ -65,3 +65,24 @@ test('activity keys grant only event QR access, stay private, and can be rotated
   await request(`/events/${event.id}/checkpoints`,{checkpoints:adminEvent.checkpoints.slice(1),expectedIds:adminEvent.checkpoints.map(c=>c.id)},true,'PUT');
   assert.equal((await request(path,{key:'new-event-pass'})).body.checkpoints.some(c=>c.id===cp.id),false);
 });
+
+test('ending requires fresh organizer password, freezes attendance, preserves history and isolates events',async()=>{
+ const payload={name:'結束活動測試',startsAt:'2026-10-10T06:00:00+08:00',route:[[24,120],[23,120]],distance:111,activityKey:'event-only-pass',checkpoints:[{name:'起點',lat:24,lng:120,km:0}]};
+ const id=(await request('/events',payload,true)).body.id,other=(await request('/events',payload,true)).body.id;
+ const event=(await request('/events',null,true)).body.find(e=>e.id===id),cp=event.checkpoints[0];
+ const person=(await request(`/events/${id}/join`,{name:'騎士'})).body,check={checkpointId:cp.id,secret:cp.secret,token:person.token};
+ const first=(await request(`/events/${id}/checkins`,check)).body.arrivedAt;
+ assert.equal((await request(`/events/${id}/end`,{},true)).status,401);
+ assert.equal((await request(`/events/${id}/end`,{password:'event-only-pass'},true)).status,401);
+ assert.equal((await request(`/events/${id}/end`,{password:'wrong'},true)).status,401);
+ assert.equal((await request('/events')).body.find(e=>e.id===id).endedAt,null);
+ const ending=await request(`/events/${id}/end`,{password:'test-only-organizer'});
+ assert.equal(ending.status,200);assert.ok(ending.body.endedAt);
+ assert.equal((await request(`/events/${id}/end`,{password:'test-only-organizer'},true)).body.endedAt,ending.body.endedAt);
+ assert.equal((await request(`/events/${id}/join`,{name:'後到騎士'},true)).status,409);
+ assert.equal((await request(`/events/${id}/checkins`,check,true)).status,409);
+ assert.equal((await request(`/events/${id}/checkpoints`,{checkpoints:[cp],expectedIds:[cp.id]},true,'PUT')).status,409);
+ const final=(await request('/events')).body.find(e=>e.id===id);
+ assert.equal(final.endedAt,ending.body.endedAt);assert.equal(final.participants.length,1);assert.equal(final.participants[0].checkins[cp.id],first);
+ assert.equal((await request(`/events/${other}/join`,{name:'繼續騎行'})).status,201);
+});

@@ -4,3 +4,4 @@ CREATE TABLE IF NOT EXISTS participants (id TEXT PRIMARY KEY, event_id TEXT NOT 
 CREATE TABLE IF NOT EXISTS checkins (event_id TEXT NOT NULL REFERENCES events(id), participant_id TEXT NOT NULL REFERENCES participants(id), checkpoint_id TEXT NOT NULL, arrived_at TEXT NOT NULL, PRIMARY KEY(event_id,participant_id,checkpoint_id));
 CREATE INDEX IF NOT EXISTS participants_event ON participants(event_id);
 CREATE TABLE IF NOT EXISTS event_keys (event_id TEXT PRIMARY KEY REFERENCES events(id), salt TEXT NOT NULL, hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS event_endings (event_id TEXT PRIMARY KEY REFERENCES events(id), ended_at TEXT NOT NULL);
