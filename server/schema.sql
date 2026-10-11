@@ -5,3 +5,8 @@ CREATE TABLE IF NOT EXISTS checkins (event_id TEXT NOT NULL REFERENCES events(id
 CREATE INDEX IF NOT EXISTS participants_event ON participants(event_id);
 CREATE TABLE IF NOT EXISTS event_keys (event_id TEXT PRIMARY KEY REFERENCES events(id), salt TEXT NOT NULL, hash TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS event_endings (event_id TEXT PRIMARY KEY REFERENCES events(id), ended_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS organizers (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, name TEXT NOT NULL, salt TEXT NOT NULL, hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS organizer_sessions (token_hash TEXT PRIMARY KEY, organizer_id TEXT REFERENCES organizers(id), expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS sessions_organizer ON organizer_sessions(organizer_id);
+CREATE TABLE IF NOT EXISTS event_owners (event_id TEXT PRIMARY KEY REFERENCES events(id), organizer_id TEXT REFERENCES organizers(id));
+CREATE INDEX IF NOT EXISTS owner_organizer ON event_owners(organizer_id);

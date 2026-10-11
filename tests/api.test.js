@@ -1,8 +1,9 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {DatabaseSync} from 'node:sqlite';import {readFileSync} from 'node:fs';import worker from '../server/worker.js';
 const sqlite=new DatabaseSync(':memory:');sqlite.exec(readFileSync(new URL('../server/schema.sql',import.meta.url),'utf8'));
 const DB={prepare(sql){return{bind(...args){return{async run(){return sqlite.prepare(sql).run(...args)},async first(){return sqlite.prepare(sql).get(...args)||null},async all(){return {results:sqlite.prepare(sql).all(...args)}}}},async all(){return{results:sqlite.prepare(sql).all()}}}}};
+DB.batch=async statements=>{sqlite.exec('BEGIN');try{const results=[];for(const s of statements)results.push(await s.run());sqlite.exec('COMMIT');return results;}catch(e){sqlite.exec('ROLLBACK');throw e;}};
 const env={DB,ADMIN_KEY:'test-only-organizer',ASSETS:{fetch:()=>new Response('asset')}};
-async function request(path,body,admin=false,method='POST'){const response=await worker.fetch(new Request('http://test/api'+path,{method:body?method:'GET',headers:{'Content-Type':'application/json',...(admin?{Authorization:'Bearer test-only-organizer'}:{})},...(body?{body:JSON.stringify(body)}:{})}),env);return{status:response.status,body:await response.json()};}
+async function request(path,body,admin=false,method='POST'){const response=await worker.fetch(new Request('http://test/api'+path,{method:body?method:'GET',headers:{'Content-Type':'application/json',...(admin?{Authorization:'Bearer '+(typeof admin==='string'?admin:'test-only-organizer')}:{})},...(body?{body:JSON.stringify(body)}:{})}),env);return{status:response.status,body:await response.json()};}
 test('shared attendance: authorization, uniqueness, token identity, idempotency, and event isolation',async()=>{const payload={name:'測試騎行',startsAt:'2026-10-10T06:00:00+08:00',route:[[24,120],[23,120]],distance:111,checkpoints:[{name:'起點',lat:24,lng:120,km:0},{name:'終點',lat:23,lng:120,km:111}]};assert.equal((await request('/events',payload)).status,401);assert.equal((await request('/events',{...payload,route:[[999,120],[23,120]]},true)).status,400);const event=(await request('/events',payload,true)).body;const second=(await request('/events',payload,true)).body;const publicList=(await request('/events')).body;assert.equal(publicList[0].checkpoints[0].secret,undefined);const all=(await request('/events',null,true)).body;const cp=all.find(e=>e.id===event.id).checkpoints[0];const p=(await request(`/events/${event.id}/join`,{name:'小安'})).body;assert.ok(p.token);assert.equal((await request(`/events/${event.id}/join`,{name:'小安'})).status,409);assert.equal((await request(`/events/${second.id}/join`,{name:'小安'})).status,201);const check={checkpointId:cp.id,secret:cp.secret,token:p.token};assert.equal((await request(`/events/${event.id}/checkins`,{...check,secret:'invalid'})).status,400);assert.equal((await request(`/events/${event.id}/checkins`,{...check,token:'invalid'})).status,401);const first=await request(`/events/${event.id}/checkins`,check);assert.equal(first.status,200);const repeat=await request(`/events/${event.id}/checkins`,check);assert.equal(first.body.arrivedAt,repeat.body.arrivedAt);assert.equal((await request(`/events/${second.id}/checkins`,check)).status,400);const list=(await request('/events')).body;assert.equal(list.find(e=>e.id===event.id).participants[0].checkins[cp.id],first.body.arrivedAt);assert.equal(list.find(e=>e.id===second.id).participants[0].checkins[cp.id],undefined);});
 test('add/remove checkpoints preserves checkins, QR identities, and guards stale updates',async()=>{const initial=(await request('/events',null,true)).body[0];const original=initial.checkpoints[0];const person=(await request(`/events/${initial.id}/join`,{name:'刪除保留測試'})).body;await request(`/events/${initial.id}/checkins`,{checkpointId:original.id,secret:original.secret,token:person.token});const added={id:'client-new',name:'新增補給站',lat:23.5,lng:120,km:55};const change={checkpoints:[...initial.checkpoints,added],expectedIds:initial.checkpoints.map(c=>c.id)};assert.equal((await request(`/events/${initial.id}/checkpoints`,change,false,'PUT')).status,401);assert.equal((await request(`/events/${initial.id}/checkpoints`,change,true,'PUT')).status,200);assert.equal((await request(`/events/${initial.id}/checkpoints`,change,true,'PUT')).status,409);const next=(await request('/events',null,true)).body.find(e=>e.id===initial.id);assert.equal(next.checkpoints.length,3);assert.equal(next.checkpoints[0].secret,original.secret);assert.ok(next.checkpoints[2].secret);assert.notEqual(next.checkpoints[2].id,'client-new');assert.equal((await request(`/events/${initial.id}/checkpoints`,{checkpoints:next.checkpoints.slice(1),expectedIds:next.checkpoints.map(c=>c.id)},true,'PUT')).status,200);const removed=(await request('/events',null,true)).body.find(e=>e.id===initial.id);assert.equal(removed.checkpoints.length,2);assert.ok(removed.participants.find(p=>p.id===person.id).checkins[original.id]);assert.equal((await request(`/events/${initial.id}/checkins`,{checkpointId:original.id,secret:original.secret,token:person.token})).status,400);const archived=JSON.parse(sqlite.prepare('SELECT checkpoints FROM events WHERE id=?').get(initial.id).checkpoints).find(c=>c.id===original.id);assert.ok(archived.deletedAt);assert.equal((await request(`/events/${initial.id}/checkpoints`,{checkpoints:[],expectedIds:removed.checkpoints.map(c=>c.id)},true,'PUT')).status,400);});
 
@@ -85,4 +86,72 @@ test('ending requires fresh organizer password, freezes attendance, preserves hi
  const final=(await request('/events')).body.find(e=>e.id===id);
  assert.equal(final.endedAt,ending.body.endedAt);assert.equal(final.participants.length,1);assert.equal(final.participants[0].checkins[cp.id],first);
  assert.equal((await request(`/events/${other}/join`,{name:'繼續騎行'})).status,201);
+});
+
+test('1.3 organizers have isolated ownership and revoked, expiring sessions',async()=>{
+ const alicePassword='alice-unique-pass',bobPassword='bob-unique-pass';
+ assert.equal((await request('/organizers',{username:'alice',name:'阿哲',password:alicePassword})).status,403);
+ assert.equal((await request('/organizers',{username:'alice',name:'阿哲',password:'short'},true)).status,400);
+ const alice=(await request('/organizers',{username:'alice',name:'阿哲',password:alicePassword},true)).body;
+ const bob=(await request('/organizers',{username:'bob',name:'小安',password:bobPassword},true)).body;
+ assert.equal((await request('/organizers',{username:'ALICE',name:'重複',password:bobPassword},true)).status,409);
+ assert.equal((await request('/auth/login',{username:'alice',password:bobPassword})).status,401);
+ const a=(await request('/auth/login',{username:'ALICE',password:alicePassword})).body;
+ const b=(await request('/auth/login',{username:'bob',password:bobPassword})).body;
+ assert.equal(a.actor.id,alice.id);assert.equal(a.actor.role,'organizer');assert.equal(a.actor.hash,undefined);
+ assert.equal((await request('/health',null,a.token)).body.actor.id,alice.id);
+ assert.equal((await request('/health',null,alicePassword)).body.admin,false);
+ assert.equal((await request('/organizers',null,a.token)).status,403);
+ assert.equal((await request('/organizers/'+bob.id,{password:'hijack-password'},a.token,'PUT')).status,403);
+ const payload={name:'各自主辦',startsAt:'2026-10-12T06:00:00+08:00',route:[[24,120],[23,120]],distance:111,checkpoints:[{name:'起點',lat:24,lng:120,km:0}]};
+ const ae=(await request('/events',{...payload,ownerId:bob.id},a.token)).body.id;
+ const be=(await request('/events',payload,b.token)).body.id;
+ const list=(await request('/events',null,a.token)).body;
+ const own=list.find(e=>e.id===ae),other=list.find(e=>e.id===be);
+ assert.equal(own.ownerId,alice.id);assert.equal(own.ownerName,'阿哲');assert.equal(own.canManage,true);assert.ok(own.checkpoints[0].secret);
+ assert.equal(other.canManage,false);assert.equal(other.checkpoints[0].secret,undefined);
+ const publicEvent=(await request('/events')).body.find(e=>e.id===ae);assert.equal(publicEvent.canManage,false);assert.equal(publicEvent.checkpoints[0].secret,undefined);
+ const cp=own.checkpoints[0],change={checkpoints:[{...cp,name:'新起點'}],expectedIds:[cp.id]};
+ assert.equal((await request(`/events/${ae}/checkpoints`,change,b.token,'PUT')).status,403);
+ assert.equal((await request(`/events/${ae}/activity-key`,{key:'new-activity-pass'},b.token,'PUT')).status,403);
+ assert.equal((await request(`/events/${ae}/qr-access`,{},b.token)).status,403);
+ assert.equal((await request(`/events/${ae}/owner`,{organizerId:bob.id},a.token,'PUT')).status,403);
+ assert.equal((await request(`/events/${ae}/end`,{password:bobPassword},b.token)).status,403);
+ assert.equal((await request(`/events/${ae}/end`,{password:alicePassword},b.token)).status,403);
+ assert.equal((await request(`/events/${ae}/end`,{password:bobPassword},a.token)).status,401);
+ assert.equal((await request(`/events/${ae}/checkpoints`,change,a.token,'PUT')).status,200);
+ assert.equal((await request(`/events/${ae}/activity-key`,{key:'event-access-key'},a.token,'PUT')).status,200);
+ assert.equal((await request(`/events/${ae}/qr-access`,{key:'event-access-key'},b.token)).status,200);
+ assert.equal((await request(`/events/${ae}/checkpoints`,change,b.token,'PUT')).status,403);
+ assert.equal((await request(`/events/${ae}/end`,{password:alicePassword},a.token)).status,200);
+ assert.equal((await request(`/events/${be}/join`,{name:'仍可參加'})).status,201);
+ // Assign a legacy/manager activity without touching existing check-ins or QR identities.
+ const legacy=(await request('/events',payload,true)).body.id;
+ const legacyBefore=sqlite.prepare('SELECT checkpoints FROM events WHERE id=?').get(legacy).checkpoints;
+ assert.equal((await request(`/events/${legacy}/checkpoints`,change,a.token,'PUT')).status,403);
+ assert.equal((await request(`/events/${legacy}/owner`,{organizerId:alice.id},true,'PUT')).status,200);
+ assert.equal((await request('/events',null,a.token)).body.find(e=>e.id===legacy).canManage,true);
+ assert.equal((await request(`/events/${legacy}/owner`,{organizerId:bob.id},true,'PUT')).status,200);
+ assert.equal((await request('/events',null,a.token)).body.find(e=>e.id===legacy).canManage,false);
+ assert.equal(sqlite.prepare('SELECT checkpoints FROM events WHERE id=?').get(legacy).checkpoints,legacyBefore);
+ assert.equal((await request(`/events/${legacy}/activity-key`,{key:'invalid-owner-update'},a.token,'PUT')).status,403);
+ const accountList=(await request('/organizers',null,true)).body;assert.equal(accountList.find(o=>o.id===alice.id).hash,undefined);assert.equal(accountList.find(o=>o.id===alice.id).salt,undefined);
+ const saved=sqlite.prepare('SELECT * FROM organizers WHERE id=?').get(alice.id);assert.notEqual(saved.hash,alicePassword);
+ assert.equal(sqlite.prepare('SELECT token_hash FROM organizer_sessions WHERE organizer_id=?').get(alice.id).token_hash.length,64);
+ assert.equal((await request('/organizers/'+alice.id,{password:'alice-reset-pass'},true,'PUT')).status,200);
+ assert.equal((await request('/health',null,a.token)).body.admin,false);
+ assert.equal((await request('/events',payload,a.token)).status,401);
+ assert.equal((await request('/auth/login',{username:'alice',password:alicePassword})).status,401);
+ const reset=(await request('/auth/login',{username:'alice',password:'alice-reset-pass'})).body;
+ assert.equal((await request('/organizers/'+alice.id,{active:false},true,'PUT')).status,200);
+ assert.equal((await request('/health',null,reset.token)).body.admin,false);
+ assert.equal((await request('/auth/login',{username:'alice',password:'alice-reset-pass'})).status,401);
+ assert.equal((await request('/organizers/'+alice.id,{active:true},true,'PUT')).status,200);
+ assert.equal((await request('/auth/login',{username:'alice',password:'alice-reset-pass'})).status,200);
+ await request('/auth/logout',{},b.token);assert.equal((await request('/health',null,b.token)).body.admin,false);
+ const expiry=(await request('/auth/login',{username:'bob',password:bobPassword})).body;
+ sqlite.prepare('UPDATE organizer_sessions SET expires_at=? WHERE organizer_id=?').run('2000-01-01T00:00:00Z',bob.id);
+ assert.equal((await request('/health',null,expiry.token)).body.actor,null);
+ const manager=(await request('/auth/login',{role:'manager',password:'test-only-organizer'})).body;
+ assert.equal(manager.actor.role,'manager');assert.equal((await request('/organizers',null,manager.token)).status,200);
 });

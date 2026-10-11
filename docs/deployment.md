@@ -66,3 +66,7 @@ npx wrangler d1 export rideline-db --remote --output .wrangler/rideline-backup.s
 ## 1.1 升級
 
 推送 1.1 觸發自動部署前，先執行 `npm run db:remote`，建立 `event_endings` 表。此表獨立記錄活動結束時間，保留原活動、參加者與打卡資料；舊版本部署可忽略此表。新版結束活動需要重新輸入 `ADMIN_KEY`，並於後端阻擋已結束活動的加入及打卡。
+
+## 1.3 升級
+
+先執行 `npm run db:remote` 新增 organizers、organizer_sessions、event_owners 與索引，再推送新版。原 ADMIN_KEY 改為管理者登入使用，不需重新設定；舊活動沒有 owner 紀錄時仍歸管理者管理。管理者可新增各主辦者，將舊活動指派給本人。密碼只儲存雜湊，登入有效 8 小時，停用或重設密碼會撤銷登入。資料表均使用 CREATE TABLE IF NOT EXISTS，不清空活動或打卡紀錄。

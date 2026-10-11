@@ -20,7 +20,7 @@ export async function exportTimelineImage(svg,{event,stations,count,format='png'
   const chart=svg.cloneNode(true);chart.setAttribute('x','0');chart.setAttribute('y',String(y));chart.setAttribute('font-family','Arial, sans-serif');
   root.append(chart);const height=y+Number(svg.getAttribute('height'))+40;root.setAttribute('height',String(height));
   const bg=document.createElementNS(ns,'rect');bg.setAttribute('width','100%');bg.setAttribute('height','100%');bg.setAttribute('fill','#fff');root.prepend(bg);
-  const footer=document.createElementNS(ns,'text');footer.setAttribute('x','24');footer.setAttribute('y',String(height-14));footer.setAttribute('font-size','13');footer.setAttribute('fill','#69786f');footer.textContent='RIDELINE v1.1 · 每一程，都有跡可循。';root.append(footer);
+  const footer=document.createElementNS(ns,'text');footer.setAttribute('x','24');footer.setAttribute('y',String(height-14));footer.setAttribute('font-size','13');footer.setAttribute('fill','#69786f');footer.textContent='RIDELINE v1.3 · 每一程，都有跡可循。';root.append(footer);
   const source=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(root)],{type:'image/svg+xml;charset=utf-8'}));
   let downloadURL;
   try {
