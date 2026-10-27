@@ -70,3 +70,11 @@ npx wrangler d1 export rideline-db --remote --output .wrangler/rideline-backup.s
 ## 1.3 升級
 
 先執行 `npm run db:remote` 新增 organizers、organizer_sessions、event_owners 與索引，再推送新版。原 ADMIN_KEY 改為管理者登入使用，不需重新設定；舊活動沒有 owner 紀錄時仍歸管理者管理。管理者可新增各主辦者，將舊活動指派給本人。密碼只儲存雜湊，登入有效 8 小時，停用或重設密碼會撤銷登入。資料表均使用 CREATE TABLE IF NOT EXISTS，不清空活動或打卡紀錄。
+
+## 1.4.0 發布紀錄（2026-10-27）
+
+- 新增公開活動即時看板，升級套件、網站頁尾與圖表匯出版號。
+- 使用 `npm run deploy` 發布既有 `rideline` Worker，沒有執行 D1 資料表變更。
+- Worker 版本：`1d8c7b75-cab8-4e3f-bc44-da48c0855d93`。
+- 發布前 Worker 版本：`0fc2f52f-7437-43e7-971d-a5e4221b3041`。若公開看板或既有公開 API 無法載入，可使用 `npx wrangler rollback 0fc2f52f-7437-43e7-971d-a5e4221b3041` 回退應用程式；不回退 D1。
+- 發布驗證：21 項測試通過、Vite 正式建置成功；正式 `/api/health` 回傳 HTTP 200、shared、未登入身份，公開看板、站點篩選、分享連結及手機排版正常，沒有 JavaScript 執行錯誤。
