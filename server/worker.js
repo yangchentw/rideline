@@ -1,6 +1,8 @@
+import {withUnifiedStart} from '../src/activity-start.js';
 import {resolveMapsLink} from '../src/maps.js';
 import {validActivityKey,hashActivityKey,verifyActivityKey} from './activity-key.js';
 import {actorFor,organizersAPI} from './organizers.js';
+import {validateEventStart} from '../src/event-time.js';
 const json = (data, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
 const uuid = () => crypto.randomUUID();
 export default {
@@ -22,7 +24,7 @@ export default {
         const { results: owners } = await env.DB.prepare('SELECT event_owners.event_id,event_owners.organizer_id,organizers.name FROM event_owners LEFT JOIN organizers ON organizers.id=event_owners.organizer_id').all();
         const { results: endings } = await env.DB.prepare('SELECT * FROM event_endings').all();
         const { results: keys } = await env.DB.prepare('SELECT event_id FROM event_keys').all();
-        return json(events.map(e => ({ id:e.id, name:e.name, startsAt:e.starts_at, description:e.description, ownerId:owners.find(o=>o.event_id===e.id)?.organizer_id||null,ownerName:owners.find(o=>o.event_id===e.id)?.name||'管理者',canManage:manager||!!actor&&owners.some(o=>o.event_id===e.id&&o.organizer_id===actor.id),route:JSON.parse(e.route), distance:e.distance,
+        return json(events.map(e => withUnifiedStart({ id:e.id, name:e.name, startsAt:e.starts_at, description:e.description, ownerId:owners.find(o=>o.event_id===e.id)?.organizer_id||null,ownerName:owners.find(o=>o.event_id===e.id)?.name||'管理者',canManage:manager||!!actor&&owners.some(o=>o.event_id===e.id&&o.organizer_id===actor.id),route:JSON.parse(e.route), distance:e.distance,
           archivedCheckpoints:JSON.parse(e.checkpoints).filter(c=>c.deletedAt).map(c=>({...c,secret:undefined})),endedAt:endings.find(x=>x.event_id===e.id)?.ended_at||null,hasActivityKey:keys.some(k=>k.event_id===e.id),checkpoints:JSON.parse(e.checkpoints).filter(c=>!c.deletedAt).map(c => (manager||!!actor&&owners.some(o=>o.event_id===e.id&&o.organizer_id===actor.id)) ? c : ({ ...c, secret:undefined })),
           participants:people.filter(p=>p.event_id===e.id).map(p=>({id:p.id,name:p.name,joinedAt:p.joined_at,checkins:Object.fromEntries(checks.filter(c=>c.participant_id===p.id).map(c=>[c.checkpoint_id,c.arrived_at]))})) })));
       }
@@ -30,8 +32,10 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/events') {
         if (!admin) return json({error:'請先登入主辦者'},401);
         if(body.activityKey!==undefined&&body.activityKey!==''&&!validActivityKey(body.activityKey))return json({error:'活動金鑰請設定為 6–64 字'},400);
+        try{validateEventStart(body.startsAt);}catch(e){return json({error:e.message},400);}
         if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 100 || !Number.isFinite(Date.parse(body.startsAt)) || !Array.isArray(body.route) || body.route.length < 2 || body.route.length>15000 || body.route.some(p=>!Array.isArray(p)||p.length!==2||!Number.isFinite(p[0])||!Number.isFinite(p[1])||Math.abs(p[0])>90||Math.abs(p[1])>180) || !Array.isArray(body.checkpoints) || body.checkpoints.length<1 || body.checkpoints.length>30 || body.checkpoints.some(c=>!c.name?.trim()||c.name.length>100||!Number.isFinite(c.lat)||!Number.isFinite(c.lng)||Math.abs(c.lat)>90||Math.abs(c.lng)>180)) return json({error:'活動資料不完整，請檢查路線與打卡點'},400);
-        const id=uuid(), checkpoints=body.checkpoints.map(c=>({...c,id:uuid(),secret:uuid()}));
+        if(body.checkpoints.some((c,i)=>c.isStart&&i!==0))return json({error:'統一起始點必須是第一站'},400);
+        const id=uuid(), checkpoints=body.checkpoints.map((c,i)=>({...c,id:uuid(),secret:uuid(),isStart:i===0&&c.isStart===true,...(i===0&&c.isStart===true?{name:'起點',lat:body.route[0][0],lng:body.route[0][1],km:0}:{})}));
         const activityKey=body.activityKey?await hashActivityKey(body.activityKey):null;
         const statements=[env.DB.prepare('INSERT INTO events VALUES (?,?,?,?,?,?,?,?)').bind(id,body.name.trim(),body.startsAt,String(body.description||'').slice(0,1000),JSON.stringify(body.route),Number(body.distance)||0,JSON.stringify(checkpoints),new Date().toISOString()),env.DB.prepare('INSERT INTO event_owners VALUES (?,?)').bind(id,actor.id)];
         if(activityKey)statements.push(env.DB.prepare('INSERT INTO event_keys VALUES (?,?,?)').bind(id,activityKey.salt,activityKey.hash));
@@ -79,7 +83,7 @@ export default {
           if(!stored)return json({error:'此活動尚未設定活動金鑰，請聯絡主辦者'},403);
           if(!await verifyActivityKey(body.key,stored))return json({error:'活動金鑰不正確'},401);
         }
-        return json({checkpoints:JSON.parse(event.checkpoints).filter(c=>!c.deletedAt).map(c=>({id:c.id,secret:c.secret}))});
+        return json({checkpoints:JSON.parse(event.checkpoints).filter(c=>!c.deletedAt&&!c.isStart).map(c=>({id:c.id,secret:c.secret}))});
       }
       if (action==='join' && request.method==='POST') {
         const name=String(body.name||'').trim().normalize('NFKC');
@@ -93,6 +97,7 @@ export default {
       }
       if(action==='checkins' && request.method==='POST') {
         const cp=JSON.parse(event.checkpoints).find(c=>!c.deletedAt && c.id===body.checkpointId && c.secret===body.secret);
+        if(cp?.isStart)return json({error:'起點使用活動統一起始時間，不需要打卡'},400);
         if(!cp) return json({error:'打卡 QR Code 無效'},400);
         const p=await env.DB.prepare('SELECT id,name FROM participants WHERE event_id=? AND token=?').bind(eventId,String(body.token||'')).first();
         if(!p) return json({error:'請先加入活動'},401);
@@ -105,8 +110,10 @@ export default {
         if(!admin) return json({error:'請先登入主辦者'},401);
         const old=JSON.parse(event.checkpoints), active=old.filter(c=>!c.deletedAt);
         if(!Array.isArray(body.checkpoints)||body.checkpoints.length<1||body.checkpoints.length>30||new Set(body.checkpoints.map(c=>c.id)).size!==body.checkpoints.length||body.checkpoints.some(c=>typeof c.id!=='string'||!c.id||typeof c.name!=='string'||!c.name.trim()||c.name.length>100||!Number.isFinite(c.lat)||Math.abs(c.lat)>90||!Number.isFinite(c.lng)||Math.abs(c.lng)>180||old.some(o=>o.id===c.id&&o.deletedAt))) return json({error:'打卡點資料不正確，活動至少需要一個打卡點'},400);
+        const start=active.find(c=>c.isStart);
+        if(start&&body.checkpoints[0]?.id!==start.id)return json({error:'統一起始點須保留在第一站，不能刪除或重新排序'},400);
         if(JSON.stringify(body.expectedIds)!==JSON.stringify(active.map(c=>c.id)))return json({error:'打卡點已被更新，請重新整理後再試'},409);
-        const next=body.checkpoints.map(c=>{const existing=active.find(o=>o.id===c.id);return {id:existing?.id||uuid(),secret:existing?.secret||uuid(),name:c.name.trim(),lat:c.lat,lng:c.lng,km:Number.isFinite(c.km)?c.km:existing?.km||0,mapsUrl:typeof c.mapsUrl==='string'?c.mapsUrl.slice(0,4096):''};});
+        const next=body.checkpoints.map(c=>{const existing=active.find(o=>o.id===c.id);return {id:existing?.id||uuid(),secret:existing?.secret||uuid(),name:existing?.isStart?existing.name:c.name.trim(),lat:existing?.isStart?existing.lat:c.lat,lng:existing?.isStart?existing.lng:c.lng,isStart:existing?.isStart===true,km:existing?.isStart?0:Number.isFinite(c.km)?c.km:existing?.km||0,mapsUrl:typeof c.mapsUrl==='string'?c.mapsUrl.slice(0,4096):''};});
         const removed=old.filter(o=>!body.checkpoints.some(c=>c.id===o.id)).map(o=>({...o,deletedAt:o.deletedAt||new Date().toISOString()}));
         const result=await env.DB.prepare('UPDATE events SET checkpoints=? WHERE id=? AND checkpoints=? AND NOT EXISTS (SELECT 1 FROM event_endings WHERE event_id=?)').bind(JSON.stringify([...next,...removed]),eventId,event.checkpoints,eventId).run();
         if((result.meta?.changes??result.changes)===0)return json({error:'打卡點已被更新，請重新整理後再試'},409);

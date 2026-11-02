@@ -21,3 +21,7 @@ test('camera reader decodes a generated QR frame and validates its event and che
 test('camera reader rejects unrelated codes, other events, and disabled or incomplete points',()=>{
   for(const value of ['not-a-url',url.replace('ride.test','other.test'),url.replace('/?','/other?'),url.replace('ride-a','ride-b'),url.replace('cp-a','unknown'),url.replace('cp-a','retired'),url.replace('&key=qr-secret','')])assert.throws(()=>readCheckinCode(value,context));
 });
+
+test('shared start QR is rejected without changing normal station validation',()=>{
+ assert.throws(()=>readCheckinCode(url,{...context,checkpoints:[{...context.checkpoints[0],isStart:true}]}),/統一起始時間，不需要打卡/);
+});

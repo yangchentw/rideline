@@ -5,6 +5,7 @@ export function readCheckinCode(text,{origin,pathname,eventId,checkpoints}){
   if(url.searchParams.get('event')!==eventId)throw new Error('這是其他活動的 QR Code，請確認你目前選擇的活動。');
   const id=url.searchParams.get('checkpoint'),secret=url.searchParams.get('key');
   const checkpoint=checkpoints.find(c=>c.id===id&&!c.deletedAt);
+  if(checkpoint?.isStart)throw new Error('起點使用活動統一起始時間，不需要打卡。');
   if(!checkpoint||!secret)throw new Error('找不到此打卡點，請掃描有效的站點 QR Code。');
   return {checkpoint,secret};
 }
