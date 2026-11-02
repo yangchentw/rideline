@@ -204,3 +204,26 @@ test('maps resolution uses the already parsed POST body for complete and short l
  const invalid=await request('/maps/resolve',{url:'https://example.com/private'},true);
  assert.equal(invalid.status,400);assert.match(invalid.body.error,/Google Maps/);
 });
+
+test('creating a shared start preserves its custom name',async()=>{
+ const payload={name:'自訂起點活動',startsAt:new Date(Date.now()+9*3600000).toISOString(),route:[[24,120],[23,120]],distance:111,checkpoints:[{name:' 台北集合站 ',lat:24,lng:120,km:0,isStart:true},{name:'終點',lat:23,lng:120,km:111}]};
+ const created=await request('/events',payload,true);assert.equal(created.status,201);
+ const event=(await request('/events')).body.find(e=>e.id===created.body.id);
+ assert.equal(event.checkpoints[0].name,'台北集合站');
+ assert.equal(event.checkpoints[0].isStart,true);
+});
+test('renaming the shared start preserves its role, route origin, and unified time',async()=>{
+ const payload={name:'起點更名活動',startsAt:new Date(Date.now()+9*3600000).toISOString(),route:[[24,120],[23,120]],distance:111,checkpoints:[{name:'起點',lat:24,lng:120,km:0,isStart:true},{name:'終點',lat:23,lng:120,km:111}]};
+ const created=await request('/events',payload,true),id=created.body.id;
+ await request(`/events/${id}/join`,{name:'騎士'});
+ const event=(await request('/events',null,true)).body.find(e=>e.id===id),start=event.checkpoints[0];
+ const next=[{...start,name:' 新集合地點 ',lat:22,lng:121,km:55},event.checkpoints[1]];
+ assert.equal((await request(`/events/${id}/checkpoints`,{checkpoints:next,expectedIds:event.checkpoints.map(c=>c.id)},true,'PUT')).status,200);
+ const saved=(await request('/events',null,true)).body.find(e=>e.id===id);
+ assert.equal(saved.checkpoints[0].name,'新集合地點');
+ assert.equal(saved.checkpoints[0].isStart,true);
+ assert.equal(saved.checkpoints[0].id,start.id);assert.equal(saved.checkpoints[0].secret,start.secret);
+ assert.deepEqual([saved.checkpoints[0].lat,saved.checkpoints[0].lng,saved.checkpoints[0].km],[24,120,0]);
+ assert.equal(saved.participants[0].checkins[start.id],payload.startsAt);
+ assert.equal((await request(`/events/${id}/qr-access`,{},true)).body.checkpoints.some(c=>c.id===start.id),false);
+});
