@@ -28,7 +28,7 @@ export default {
           archivedCheckpoints:JSON.parse(e.checkpoints).filter(c=>c.deletedAt).map(c=>({...c,secret:undefined})),endedAt:endings.find(x=>x.event_id===e.id)?.ended_at||null,hasActivityKey:keys.some(k=>k.event_id===e.id),checkpoints:JSON.parse(e.checkpoints).filter(c=>!c.deletedAt).map(c => (manager||!!actor&&owners.some(o=>o.event_id===e.id&&o.organizer_id===actor.id)) ? c : ({ ...c, secret:undefined })),
           participants:people.filter(p=>p.event_id===e.id).map(p=>({id:p.id,name:p.name,joinedAt:p.joined_at,checkins:Object.fromEntries(checks.filter(c=>c.participant_id===p.id).map(c=>[c.checkpoint_id,c.arrived_at]))})) })));
       }
-      if(url.pathname==='/api/maps/resolve' && request.method==='POST'){if(!admin)return json({error:'請先登入主辦者'},401);try{const {url:link}=await request.json();return json(await resolveMapsLink(link));}catch(e){return json({error:e.message},400);}}
+      if(url.pathname==='/api/maps/resolve' && request.method==='POST'){if(!admin)return json({error:'請先登入主辦者'},401);try{return json(await resolveMapsLink(body.url));}catch(e){return json({error:e.message},400);}}
       if (request.method === 'POST' && url.pathname === '/api/events') {
         if (!admin) return json({error:'請先登入主辦者'},401);
         if(body.activityKey!==undefined&&body.activityKey!==''&&!validActivityKey(body.activityKey))return json({error:'活動金鑰請設定為 6–64 字'},400);

@@ -191,3 +191,16 @@ test('new shared-start activities use the configured time, omit start QR and pre
  assert.equal(event.checkpoints[0].isStart,true);
  assert.equal(event.participants.find(p=>p.id===a.id).checkins[start.id],payload.startsAt);
 });
+
+test('maps resolution uses the already parsed POST body for complete and short links',async t=>{
+ const full='https://www.google.com/maps/place/Checkpoint/data=!3d25.045!4d121.079';
+ assert.equal((await request('/maps/resolve',{url:full})).status,401);
+ const direct=await request('/maps/resolve',{url:full},true);
+ assert.equal(direct.status,200);assert.equal(direct.body.lat,25.045);assert.equal(direct.body.lng,121.079);
+ let calls=0;
+ t.mock.method(globalThis,'fetch',async()=>{calls++;return new Response(null,{status:302,headers:{location:full}});});
+ const short=await request('/maps/resolve',{url:'https://maps.app.goo.gl/example'},true);
+ assert.equal(short.status,200);assert.equal(short.body.name,'Checkpoint');assert.equal(short.body.lat,25.045);assert.equal(calls,1);
+ const invalid=await request('/maps/resolve',{url:'https://example.com/private'},true);
+ assert.equal(invalid.status,400);assert.match(invalid.body.error,/Google Maps/);
+});
